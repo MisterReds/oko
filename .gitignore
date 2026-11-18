@@ -1,0 +1,14 @@
+/target/
+/desktop/target/
+/dist/
+/assets/*.ttf
+*.log
+*.pid
+.env
+*.AppImage
+*.deb
+*.tar.gz
+*.zip
+__pycache__/
+.DS_Store
+/.cache/
