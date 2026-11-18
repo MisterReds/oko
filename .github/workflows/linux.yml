@@ -1,0 +1,124 @@
+name: Linux CI and Release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-x86_64:
+    name: Build and test Linux x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Rust 1.91.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.1
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop -> target
+
+      - name: Install native build and smoke-test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev squashfs-tools fonts-dejavu-core \
+            xvfb xauth libgl1-mesa-dri
+          mkdir -p .cache
+
+      - name: Prepare build-time font
+        run: bash scripts/bootstrap-fonts.sh
+
+      - name: Test core and protocol
+        run: cargo test --release --locked
+
+      - name: Compile agent and master
+        run: cargo build --release --locked
+
+      - name: Compile native desktop UI
+        run: cargo build --release --locked --manifest-path desktop/Cargo.toml
+
+      - name: Test teacher/student role isolation
+        run: node tests/role-auth.mjs
+
+      - name: Smoke-test both native windows under Xvfb
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a python3 tests/smoke-gui.py
+
+      - name: Download AppImage packaging tool
+        run: |
+          curl -fL --retry 3 \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+            -o .cache/appimagetool-x86_64.AppImage
+          chmod +x .cache/appimagetool-x86_64.AppImage
+
+      - name: Produce AppImage, DEB and portable archives
+        run: python3 scripts/package-linux.py
+
+      - name: Verify checksums and packages
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS
+          unzip -t OkoNative-0.2.0-FULL.zip | tail -1
+          ./OkoTeacher-0.2.0-x86_64.AppImage --appimage-extract-and-run --help
+          ./OkoStudent-0.2.0-x86_64.AppImage --appimage-extract-and-run --help
+
+      - name: Publish workflow artifacts for testing
+        uses: actions/upload-artifact@v4
+        with:
+          name: oko-linux-x86_64
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/README-START.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  github-release:
+    name: Publish GitHub Release after successful CI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-linux-x86_64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages from validated build
+        uses: actions/download-artifact@v4
+        with:
+          name: oko-linux-x86_64
+          path: release
+
+      - name: Publish assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum -c SHA256SUMS
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "ОКО $TAG" --generate-notes
+          fi
+          gh release upload "$TAG" ./*.AppImage ./*.deb ./*.tar.gz ./*.zip ./SHA256SUMS ./README-START.txt --clobber
