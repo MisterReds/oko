@@ -28,6 +28,8 @@ with tempfile.TemporaryDirectory(prefix="oko-native-smoke-") as td:
     port = port_free()
     env = os.environ.copy()
     env["HOME"] = str(d / "teacher")
+    env["XDG_CONFIG_HOME"] = str(d / "teacher" / ".config")
+    env["XDG_STATE_HOME"] = str(d / "teacher" / ".local" / "state")
     env["OKO_BIN_DIR"] = str(binary_dir)
     env["OKO_NATIVE_PORT"] = str(port)
     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
@@ -53,6 +55,8 @@ with tempfile.TemporaryDirectory(prefix="oko-native-smoke-") as td:
         assert cfg["token"] != cfg["agent_token"]
         assert cfg["bind_lan"] is False
         env["HOME"] = str(d / "student")
+        env["XDG_CONFIG_HOME"] = str(d / "student" / ".config")
+        env["XDG_STATE_HOME"] = str(d / "student" / ".local" / "state")
         pathlib.Path(env["HOME"]).mkdir()
         student = subprocess.Popen(
             [str(DESKTOP), "--student"], env=env,
