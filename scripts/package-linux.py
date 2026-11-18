@@ -116,7 +116,7 @@ Section: education
 Priority: optional
 Architecture: amd64
 Maintainer: Oko Native Project
-Depends: libc6 (>= 2.35), libgcc-s1, libxkbcommon0, libgl1
+Depends: libc6 (>= 2.35), libgcc-s1, libxkbcommon0, libxkbcommon-x11-0, libgl1
 Description: Native Linux desktop classroom monitor
  Teacher and student GUI, bundled server and agent, no browser.
 '''
@@ -136,6 +136,14 @@ Terminal=false
         (app/'usr/bin').mkdir(parents=True)
         for src in (portable/'bin').iterdir():
             shutil.copy2(src,app/'usr/bin'/src.name)
+        # winit loads XKB libraries dynamically; bundle them for Calculate/Gentoo.
+        (app/'usr/lib').mkdir(parents=True)
+        for soname in ('libxkbcommon-x11.so.0', 'libxkbcommon.so.0', 'libxcb-xkb.so.1'):
+            candidates=[Path('/usr/lib/x86_64-linux-gnu')/soname, Path('/lib/x86_64-linux-gnu')/soname]
+            source=next((x for x in candidates if x.exists()),None)
+            if source is None:
+                raise RuntimeError(f'{soname} missing; install libxkbcommon-x11-0 and libxcb-xkb1')
+            shutil.copy2(source, app/'usr/lib'/soname,follow_symlinks=True)
         shutil.copy2(portable/'oko.svg',app/'oko.svg')
         (app/'.DirIcon').symlink_to('oko.svg')
         lower=role.lower()
@@ -150,6 +158,7 @@ Terminal=false
         put(app/'AppRun',f'''#!/bin/sh
 BASE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 export OKO_BIN_DIR="$BASE/usr/bin"
+export LD_LIBRARY_PATH="$BASE/usr/lib:${{LD_LIBRARY_PATH:-}}"
 exec "$BASE/usr/bin/oko-desktop" --{lower} "$@"
 ''',0o755)
         file=out/f'Oko{role}-{version}-x86_64.AppImage'
