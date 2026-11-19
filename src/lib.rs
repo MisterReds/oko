@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 /// Уведомление преподавателя в активной пользовательской сессии Linux.
 /// Не запускает shell; notify-send — опциональный системный компонент.
 pub fn notify_desktop(text: &str) {
-    if text.trim().is_empty() { return; }
+    if text.trim().is_empty() {
+        return;
+    }
     if let Err(e) = std::process::Command::new("notify-send")
         .args(["-t", "6000", "ОКО — сообщение преподавателя", text])
-        .spawn() {
+        .spawn()
+    {
         eprintln!("[oko-agent] notify-send недоступен: {e}");
     }
 }
@@ -88,7 +91,9 @@ pub trait Capture: Send {
     fn screen(&self) -> [u32; 2];
     /// t — секунды с момента старта (для анимации демо-экрана).
     fn grab(&mut self, t: f64) -> anyhow::Result<Vec<u8>>;
-    fn handle(&mut self, cmd: &Command);
+    /// Return the actual lock state only after the command succeeded.
+    /// A failed command must never be acknowledged as successfully applied.
+    fn handle(&mut self, cmd: &Command) -> anyhow::Result<Option<bool>>;
 }
 
 /// Упаковка кадра для консоли: [u16 BE: длина id][id utf8][jpeg].
@@ -121,7 +126,12 @@ pub fn encode_jpeg(img: &image::RgbImage, quality: u8) -> anyhow::Result<Vec<u8>
     {
         let mut cursor = std::io::Cursor::new(&mut buf);
         let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality);
-        enc.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgb8)?;
+        enc.write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgb8,
+        )?;
     }
     Ok(buf)
 }

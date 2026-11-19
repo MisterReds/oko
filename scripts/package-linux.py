@@ -7,7 +7,7 @@ core=root
 desktop=root/'desktop'
 out=root/'dist'
 out.mkdir(parents=True,exist_ok=True)
-version='0.2.0'
+version='0.3.0'
 appimagetool=Path(os.environ.get('APPIMAGETOOL_PATH', str(root/'.cache/appimagetool-x86_64.AppImage')))
 if not appimagetool.is_file():
     raise SystemExit('AppImageTool не найден: укажите APPIMAGETOOL_PATH или скачайте инструмент в .cache/')
@@ -68,33 +68,41 @@ echo "Запуск: $target/bin/oko-desktop --teacher"
 echo "Запуск: $target/bin/oko-desktop --student"
 '''
     put(portable/'scripts/install-user.sh',install,0o755)
-    readme='''ОКО Native 0.2.0 — Linux x86-64 (Rust/egui)
+    readme='''ОКО Native 0.3.0 — Linux x86-64 (Rust/egui)
 
 Два полноценных графических окна — преподаватель и ученик.
 Браузер не нужен, в пакет включены сервер и агент.
 
 APPIMAGE:
- chmod +x OkoTeacher-0.2.0-x86_64.AppImage OkoStudent-0.2.0-x86_64.AppImage
- ./OkoTeacher-0.2.0-x86_64.AppImage
- ./OkoStudent-0.2.0-x86_64.AppImage
+ chmod +x OkoTeacher-0.3.0-x86_64.AppImage OkoStudent-0.3.0-x86_64.AppImage
+ ./OkoTeacher-0.3.0-x86_64.AppImage
+ ./OkoStudent-0.3.0-x86_64.AppImage
 Если нет FUSE: добавить --appimage-extract-and-run.
 
 TAR.GZ (установка для текущего пользователя без sudo и systemd):
- tar -xf OkoNative-0.2.0-linux-x86_64.tar.gz
+ tar -xf OkoNative-0.3.0-linux-x86_64.tar.gz
  bash OkoDesktop/scripts/install-user.sh both
 
 Преподаватель: открывает окно и запускает мастер внутри приложения.
 При первом запуске создаются ДВА разных ключа ~/.config/oko/native-teacher.json.
 По умолчанию сервер прослушивает только 127.0.0.1:7600.
 Для класса включите опцию LAN в окне преподавателя.
-Ученикам сообщите ws://IP_ПРЕПОДАВАТЕЛЯ:7600 и ключ ученика из боковой панели.
-Административный ключ не передавайте ученикам.
+Для класса включите TLS-LAN: локальное управление работает на 127.0.0.1:7600,
+для учеников открывается защищённый WSS: 7601.
+Ученику необходимы три значения из окна учителя:
+  1) wss://IP_ПРЕПОДАВАТЕЛЯ:7601
+  2) отдельный ключ ученика (НЕ ключ администратора)
+  3) SHA-256 отпечаток сертификата (64 символа).
+Сверяйте отпечаток с преподавателем непосредственно, не доверяйте неизвестным адресам.
 Ученик: в отдельном окне вводит адрес, ключ и имя, затем подключается.
 Автозапуск — по выбору пользователя через XDG.
 
 ОГРАНИЧЕНИЯ И БЕЗОПАСНОСТЬ:
- - Нет TLS, трафик ws://. Используйте только доверенную сеть или VPN.
- - X11: реальный захват. Блокировка пока визуальная, не выключает ввод.
+ - В версии 0.3 для класса включён TLS с проверкой отпечатка сертификата.
+   Прежний незащищённый ws:// допускается только для localhost или при явно
+   заданном --allow-insecure в CLI агента. Не раскрывайте ключи.
+ - X11: реальный захват и перехват клавиатуры/мыши при блокировке.
+   При закрытии агента ввод освобождается, а через 120 секунд автоматически снимается блокировка.
  - Wayland/wlroots требует grim. GNOME/KDE ScreenCast Portal не реализован.
  - На X11/Wayland сообщения используют notify-send, если доступен; иначе — в журнал.
  - GUI требует x86_64 Linux, glibc 2.35+ и OpenGL/Mesa.

@@ -1,6 +1,6 @@
 // ОКО — демо-бэкенд: синтетический «экран ученика» для быстрого теста без реального рабочего стола.
 use crate::{encode_jpeg, Capture, Command};
-use ab_glyph::{Font, FontArc, Glyph, PxScale, ScaleFont, point};
+use ab_glyph::{point, Font, FontArc, Glyph, PxScale, ScaleFont};
 use image::RgbImage;
 use std::time::{Duration, Instant};
 
@@ -116,14 +116,17 @@ fn fill_tri(img: &mut RgbImage, p0: (i32, i32), p1: (i32, i32), p2: (i32, i32), 
     let maxx = ax.max(bx).max(cx).ceil() as i32;
     let miny = ay.min(by).min(cy).floor() as i32;
     let maxy = ay.max(by).max(cy).ceil() as i32;
-    let edge = |px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32| (px - x1) * (y2 - y1) - (py - y1) * (x2 - x1);
+    let edge = |px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32| {
+        (px - x1) * (y2 - y1) - (py - y1) * (x2 - x1)
+    };
     for yy in miny..=maxy {
         for xx in minx..=maxx {
             let (px, py) = (xx as f32 + 0.5, yy as f32 + 0.5);
             let e1 = edge(px, py, ax, ay, bx, by);
             let e2 = edge(px, py, bx, by, cx, cy);
             let e3 = edge(px, py, cx, cy, ax, ay);
-            let inside = (e1 >= 0.0 && e2 >= 0.0 && e3 >= 0.0) || (e1 <= 0.0 && e2 <= 0.0 && e3 <= 0.0);
+            let inside =
+                (e1 >= 0.0 && e2 >= 0.0 && e3 >= 0.0) || (e1 <= 0.0 && e2 <= 0.0 && e3 <= 0.0);
             if inside {
                 blend(img, xx, yy, c, a);
             }
@@ -135,7 +138,10 @@ fn fill_tri(img: &mut RgbImage, p0: (i32, i32), p1: (i32, i32), p2: (i32, i32), 
 
 fn text_w(font: &FontArc, scale: f32, s: &str) -> i32 {
     let sf = font.as_scaled(PxScale::from(scale));
-    (s.chars().map(|ch| sf.h_advance(font.glyph_id(ch))).sum::<f32>()).round() as i32
+    (s.chars()
+        .map(|ch| sf.h_advance(font.glyph_id(ch)))
+        .sum::<f32>())
+    .round() as i32
 }
 
 fn text(img: &mut RgbImage, font: &FontArc, scale: f32, x: i32, y: i32, c: C, s: &str) -> i32 {
@@ -170,7 +176,11 @@ fn wrap(font: &FontArc, scale: f32, s: &str, maxw: i32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut cur = String::new();
     for word in s.split_whitespace() {
-        let probe = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
+        let probe = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
         if text_w(font, scale, &probe) > maxw && !cur.is_empty() {
             lines.push(std::mem::take(&mut cur));
             cur = word.to_string();
@@ -264,13 +274,30 @@ impl DemoCapture {
 
         // главное окно «редактор»
         let (wx, wy, ww, wh) = (200, 120, 620, 520);
-        round_rect(img, wx - 10, wy - 10, ww + 20, wh + 20, 16, [30, 37, 48], 0.6);
+        round_rect(
+            img,
+            wx - 10,
+            wy - 10,
+            ww + 20,
+            wh + 20,
+            16,
+            [30, 37, 48],
+            0.6,
+        );
         round_rect(img, wx, wy, ww, wh, 12, [34, 41, 52], 1.0);
         top_bar(img, wx, wy, ww, 36, 12, [42, 50, 63]);
         for k in 0..3 {
             fill_circle(img, wx + 18 + k * 18, wy + 18, 5, [70, 78, 90], 1.0);
         }
-        text(img, &self.font, 13.0, wx + 76, wy + 11, [152, 160, 172], "Конспект урока — заметки");
+        text(
+            img,
+            &self.font,
+            13.0,
+            wx + 76,
+            wy + 11,
+            [152, 160, 172],
+            "Конспект урока — заметки",
+        );
 
         // «текст» в редакторе: полосы, длина растёт со временем, курсор мигает
         let (cx0, cy0, maxw) = (wx + 18, wy + 54, ww - 36);
@@ -278,7 +305,9 @@ impl DemoCapture {
         let n_lines = 8 + ((t / step) as u32 % 8);
         let active = (t / step) % 8.0;
         for i in 0..n_lines as i32 {
-            let lw = (maxw as f32 * (0.30 + 0.62 * hash((i as u32).wrapping_mul(7).wrapping_add(3)))) as i32;
+            let lw = (maxw as f32
+                * (0.30 + 0.62 * hash((i as u32).wrapping_mul(7).wrapping_add(3))))
+                as i32;
             let y = cy0 + i * 17;
             fill_rect(img, cx0, y, lw, 9, [72, 83, 100], 1.0);
             if (i as f64) == active.floor() {
@@ -291,14 +320,33 @@ impl DemoCapture {
 
         // окно «браузер» поверх справа
         let (bx0, by0, bw, bh) = (700, 60, 420, 320);
-        round_rect(img, bx0 - 10, by0 - 10, bw + 20, bh + 20, 16, [30, 37, 48], 0.6);
+        round_rect(
+            img,
+            bx0 - 10,
+            by0 - 10,
+            bw + 20,
+            bh + 20,
+            16,
+            [30, 37, 48],
+            0.6,
+        );
         round_rect(img, bx0, by0, bw, bh, 12, [27, 33, 42], 1.0);
         top_bar(img, bx0, by0, bw, 34, 12, [36, 44, 56]);
         round_rect(img, bx0 + 12, by0 + 8, bw - 24, 18, 9, [52, 62, 77], 1.0);
-        text(img, &self.font, 11.0, bx0 + 22, by0 + 11, [130, 139, 152], "oko.lab/урок-01");
+        text(
+            img,
+            &self.font,
+            11.0,
+            bx0 + 22,
+            by0 + 11,
+            [130, 139, 152],
+            "oko.lab/урок-01",
+        );
         round_rect(img, bx0 + 14, by0 + 50, bw - 28, 84, 8, acc, 0.30);
         for i in 0..3 {
-            let lw = ((bw - 28) as f32 * (0.45 + 0.4 * hash((i as u32).wrapping_mul(13).wrapping_add(9)))) as i32;
+            let lw = ((bw - 28) as f32
+                * (0.45 + 0.4 * hash((i as u32).wrapping_mul(13).wrapping_add(9))))
+                as i32;
             fill_rect(img, bx0 + 14, by0 + 150 + i * 22, lw, 10, [66, 77, 94], 1.0);
         }
 
@@ -307,13 +355,30 @@ impl DemoCapture {
         fill_rect(img, 0, h - th, w, th, [19, 23, 30], 1.0);
         for k in 0..4 {
             let c = if k == 0 { acc } else { [40, 48, 60] };
-            round_rect(img, 16 + k * 44, h - th + 8, 30, 18, 5, c, if k == 0 { 0.85 } else { 1.0 });
+            round_rect(
+                img,
+                16 + k * 44,
+                h - th + 8,
+                30,
+                18,
+                5,
+                c,
+                if k == 0 { 0.85 } else { 1.0 },
+            );
         }
         // часы
         let secs = 9 * 3600 + t as u64;
         let clock = format!("{:02}:{:02}", secs / 3600 % 24, secs % 3600 / 60);
         let cw = text_w(&self.font, 14.0, &clock);
-        text(img, &self.font, 14.0, w - cw - 16, h - th + 9, [142, 150, 162], &clock);
+        text(
+            img,
+            &self.font,
+            14.0,
+            w - cw - 16,
+            h - th + 9,
+            [142, 150, 162],
+            &clock,
+        );
 
         // чип с именем ученика
         let chip_w = text_w(&self.font, 13.0, &name) + 46;
@@ -322,13 +387,39 @@ impl DemoCapture {
         text(img, &self.font, 13.0, 16 + 26, 20, [226, 232, 240], &name);
 
         // курсор мыши
-        let cxx = (w as f32 * 0.52 + (t as f32 * 0.7).sin() * w as f32 * 0.16 + (t as f32 * 1.7).sin() * 14.0) as i32;
-        let cyy = (h as f32 * 0.42 + (t as f32 * 0.53).cos() * h as f32 * 0.10 + (t as f32 * 1.1).cos() * 10.0) as i32;
-        fill_tri(img, (cxx + 1, cyy + 1), (cxx + 1, cyy + 17), (cxx + 12, cyy + 7), [0, 0, 0], 0.55);
-        fill_tri(img, (cxx, cyy), (cxx, cyy + 16), (cxx + 11, cyy + 6), [240, 243, 248], 1.0);
+        let cxx = (w as f32 * 0.52
+            + (t as f32 * 0.7).sin() * w as f32 * 0.16
+            + (t as f32 * 1.7).sin() * 14.0) as i32;
+        let cyy = (h as f32 * 0.42
+            + (t as f32 * 0.53).cos() * h as f32 * 0.10
+            + (t as f32 * 1.1).cos() * 10.0) as i32;
+        fill_tri(
+            img,
+            (cxx + 1, cyy + 1),
+            (cxx + 1, cyy + 17),
+            (cxx + 12, cyy + 7),
+            [0, 0, 0],
+            0.55,
+        );
+        fill_tri(
+            img,
+            (cxx, cyy),
+            (cxx, cyy + 16),
+            (cxx + 11, cyy + 6),
+            [240, 243, 248],
+            1.0,
+        );
         let phase = t % 6.0;
         if phase < 0.35 {
-            ring(img, cxx + 2, cyy + 2, 6 + (phase * 60.0) as i32, 2, [240, 243, 248], 0.8 * (1.0 - phase / 0.35) as f32);
+            ring(
+                img,
+                cxx + 2,
+                cyy + 2,
+                6 + (phase * 60.0) as i32,
+                2,
+                [240, 243, 248],
+                0.8 * (1.0 - phase / 0.35) as f32,
+            );
         }
 
         // тост с сообщением преподавателя
@@ -354,9 +445,25 @@ impl DemoCapture {
             round_rect(img, x - 3, y - 3, box_w + 6, box_h + 6, 13, acc, 0.95);
             round_rect(img, x, y, box_w, box_h, 10, [12, 16, 22], 0.97);
             fill_rect(img, x + 1, y + 12, 3, box_h - 24, acc, 1.0);
-            text(img, &self.font, 11.0, x + 18, y + 11, [126, 135, 148], "Сообщение преподавателя");
+            text(
+                img,
+                &self.font,
+                11.0,
+                x + 18,
+                y + 11,
+                [126, 135, 148],
+                "Сообщение преподавателя",
+            );
             for (i, l) in lines.iter().enumerate() {
-                text(img, &self.font, 15.0, x + 18, y + 28 + i as i32 * 22, [232, 237, 244], l);
+                text(
+                    img,
+                    &self.font,
+                    15.0,
+                    x + 18,
+                    y + 28 + i as i32 * 22,
+                    [232, 237, 244],
+                    l,
+                );
             }
         }
 
@@ -369,8 +476,24 @@ impl DemoCapture {
             round_rect(img, cx - 24, cy + 2, 48, 38, 8, [231, 234, 240], 1.0);
             fill_circle(img, cx, cy + 21, 5, [5, 7, 10], 1.0);
             fill_rect(img, cx - 1, cy + 18, 2, 10, [5, 7, 10], 1.0);
-            text_center(img, &self.font, 26.0, cx, cy + 62, [231, 234, 240], "Экран заблокирован");
-            text_center(img, &self.font, 14.0, cx, cy + 104, [120, 130, 144], "ОКО · преподаватель");
+            text_center(
+                img,
+                &self.font,
+                26.0,
+                cx,
+                cy + 62,
+                [231, 234, 240],
+                "Экран заблокирован",
+            );
+            text_center(
+                img,
+                &self.font,
+                14.0,
+                cx,
+                cy + 104,
+                [120, 130, 144],
+                "ОКО · преподаватель",
+            );
         }
     }
 }
@@ -389,16 +512,23 @@ impl Capture for DemoCapture {
         encode_jpeg(&self.img, self.quality)
     }
 
-    fn handle(&mut self, cmd: &Command) {
+    fn handle(&mut self, cmd: &Command) -> anyhow::Result<Option<bool>> {
         match cmd.action.as_str() {
-            "lock" => self.locked = true,
-            "unlock" => self.locked = false,
+            "lock" => {
+                self.locked = true;
+                Ok(Some(true))
+            }
+            "unlock" => {
+                self.locked = false;
+                Ok(Some(false))
+            }
             "message" => {
                 if let Some(t) = cmd.text.clone() {
                     self.msg = Some((t, Instant::now() + Duration::from_secs(6)));
                 }
+                Ok(None)
             }
-            _ => {}
+            _ => anyhow::bail!("unknown command {}", cmd.action),
         }
     }
 }
@@ -427,7 +557,11 @@ mod tests {
     fn lock_darkens_screen() {
         let mut cap = DemoCapture::new("ПК-02", 70).expect("демо-бэкенд");
         let open = image::load_from_memory(&cap.grab(5.0).expect("кадр")).expect("декод");
-        cap.handle(&Command { action: "lock".into(), text: None });
+        cap.handle(&Command {
+            action: "lock".into(),
+            text: None,
+        })
+        .unwrap();
         let locked = image::load_from_memory(&cap.grab(5.0).expect("кадр")).expect("декод");
         assert!(avg_luma(&locked) < avg_luma(&open), "замок затемняет экран");
     }

@@ -3,10 +3,14 @@
 use crate::{encode_jpeg, Capture, Command};
 use anyhow::{anyhow, Context, Result};
 use image::RgbImage;
+use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    ConnectionExt, CreateWindowAux, Drawable, ImageFormat, WindowClass,
+    ConnectionExt, CreateWindowAux, Drawable, EventMask, GrabMode, GrabStatus, ImageFormat,
+    WindowClass,
 };
+use x11rb::CURRENT_TIME;
+
 use x11rb::rust_connection::RustConnection;
 
 pub struct X11Capture {
@@ -19,6 +23,7 @@ pub struct X11Capture {
     visual: u32,
     overlay: Option<u32>,
     quality: u8,
+    lock_since: Option<Instant>,
 }
 
 impl X11Capture {
@@ -43,6 +48,7 @@ impl X11Capture {
             visual,
             overlay: None,
             quality,
+            lock_since: None,
         })
     }
 
@@ -70,15 +76,54 @@ impl X11Capture {
         self.conn.map_window(win)?;
         self.conn.flush()?;
         self.overlay = Some(win);
+
+        // X11 grabs prevent keyboard/mouse input reaching other windows.
+        // Partial failures MUST release the overlay and any held grabs.
+        let result = (|| -> Result<()> {
+            let pointer = self
+                .conn
+                .grab_pointer(
+                    false,
+                    win,
+                    EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    win,
+                    0u32,
+                    CURRENT_TIME,
+                )?
+                .reply()?;
+            if pointer.status != GrabStatus::SUCCESS {
+                anyhow::bail!("cannot grab pointer (status {:?})", pointer.status);
+            }
+            let keyboard = self
+                .conn
+                .grab_keyboard(false, win, CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)?
+                .reply()?;
+            if keyboard.status != GrabStatus::SUCCESS {
+                anyhow::bail!("cannot grab keyboard (status {:?})", keyboard.status);
+            }
+            self.conn.flush()?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            let _ = self.unlock_screen();
+            return Err(e.context("X11 lock not applied"));
+        }
+        self.lock_since = Some(Instant::now());
         Ok(())
     }
 
     fn unlock_screen(&mut self) -> Result<()> {
+        // Always clear grabs, including when only one grab succeeded.
+        self.conn.ungrab_pointer(CURRENT_TIME)?;
+        self.conn.ungrab_keyboard(CURRENT_TIME)?;
         if let Some(win) = self.overlay.take() {
             self.conn.unmap_window(win)?;
             self.conn.destroy_window(win)?;
-            self.conn.flush()?;
         }
+        self.lock_since = None;
+        self.conn.flush()?;
         Ok(())
     }
 }
@@ -93,9 +138,25 @@ impl Capture for X11Capture {
     }
 
     fn grab(&mut self, _t: f64) -> Result<Vec<u8>> {
+        // Fail-safe: never leave a machine locked indefinitely.
+        if self
+            .lock_since
+            .is_some_and(|since| since.elapsed() >= Duration::from_secs(120))
+        {
+            eprintln!("[oko-agent] X11 lock expired (120 seconds), releasing input");
+            self.unlock_screen()?;
+        }
         let reply = self
             .conn
-            .get_image(ImageFormat::Z_PIXMAP, self.root, 0, 0, self.w as u16, self.h as u16, u32::MAX)?
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                self.root,
+                0,
+                0,
+                self.w as u16,
+                self.h as u16,
+                u32::MAX,
+            )?
             .reply()?;
         // ZPixmap 32bpp: B, G, R, pad
         let mut rgb = Vec::with_capacity((self.w * self.h * 3) as usize);
@@ -104,25 +165,37 @@ impl Capture for X11Capture {
             rgb.push(px[1]);
             rgb.push(px[0]);
         }
-        let img = RgbImage::from_raw(self.w, self.h, rgb).ok_or_else(|| anyhow!("размер буфера"))?;
+        let img =
+            RgbImage::from_raw(self.w, self.h, rgb).ok_or_else(|| anyhow!("размер буфера"))?;
         encode_jpeg(&img, self.quality)
     }
 
-    fn handle(&mut self, cmd: &Command) {
-        let r = match cmd.action.as_str() {
-            "lock" => self.lock_screen(),
-            "unlock" => self.unlock_screen(),
-            "message" => {
-                // Desktop notification (XDG); журнал сохраняется как fallback.
-                let text=cmd.text.as_deref().unwrap_or("");
-                eprintln!("[oko-agent] сообщение: {text}");
-                crate::notify_desktop(text);
-                Ok(())
+    fn handle(&mut self, cmd: &Command) -> Result<Option<bool>> {
+        match cmd.action.as_str() {
+            "lock" => {
+                self.lock_screen()?;
+                Ok(Some(true))
             }
-            _ => Ok(()),
-        };
-        if let Err(e) = r {
-            eprintln!("[oko-agent] x11: {e:#}");
+            "unlock" => {
+                self.unlock_screen()?;
+                Ok(Some(false))
+            }
+            "message" => {
+                let text = cmd.text.as_deref().unwrap_or("");
+                eprintln!("[oko-agent] message: {text}");
+                crate::notify_desktop(text);
+                Ok(None)
+            }
+            _ => anyhow::bail!("unknown action {}", cmd.action),
+        }
+    }
+}
+
+impl Drop for X11Capture {
+    fn drop(&mut self) {
+        // X11 also releases grabs when the X connection is dropped.
+        if self.overlay.is_some() {
+            let _ = self.unlock_screen();
         }
     }
 }
