@@ -275,10 +275,23 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
         .or_else(|| std::env::current_exe().ok())
         .ok_or("Не удалось определить путь к приложению")?;
     let path = if std::env::var_os("APPIMAGE").is_some() {
-        let dest = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".local/opt/oko/OkoStudent.AppImage");
-        fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-        fs::copy(&executable, &dest).map_err(|e| e.to_string())?;
+        // Always point autostart to the SAME stable path used by the updater.
+        // In v0.3 this copied the AppImage to a second location, so future
+        // updates installed by scripts/install.sh did not update autostart.
+        let data_root = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
+        let dest = data_root.join("oko/bin/OkoStudent.AppImage");
+        fs::create_dir_all(dest.parent().ok_or("Некорректный каталог ОКО")?)
+            .map_err(|e|e.to_string())?;
+        if !dest.is_file() {
+            let temp = dest.with_extension(format!("AppImage.tmp-{}",std::process::id()));
+            fs::copy(&executable,&temp).map_err(|e|e.to_string())?;
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&temp,fs::Permissions::from_mode(0o755)).map_err(|e|e.to_string())?;
+            }
+            fs::rename(temp,&dest).map_err(|e|e.to_string())?;
+        }
         dest
     } else {
         executable

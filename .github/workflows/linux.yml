@@ -46,6 +46,9 @@ jobs:
       - name: Prepare build-time font
         run: bash scripts/bootstrap-fonts.sh
 
+      - name: Test installer, updates, rollback and uninstall
+        run: python3 tests/installer-lifecycle.py
+
       - name: Test core and protocol
         run: cargo test --release --locked
 
@@ -94,9 +97,9 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS
-          unzip -t OkoNative-0.3.0-FULL.zip | tail -1
-          ./OkoTeacher-0.3.0-x86_64.AppImage --appimage-extract-and-run --help
-          ./OkoStudent-0.3.0-x86_64.AppImage --appimage-extract-and-run --help
+          unzip -t OkoNative-0.4.0-FULL.zip | tail -1
+          ./OkoTeacher-0.4.0-x86_64.AppImage --appimage-extract-and-run --help
+          ./OkoStudent-0.4.0-x86_64.AppImage --appimage-extract-and-run --help
 
       - name: Publish workflow artifacts for testing
         uses: actions/upload-artifact@v4
@@ -112,10 +115,48 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  distro-compat:
+    name: Check packaged GUI on Ubuntu 24.04 and Fedora 43
+    needs: build-linux-x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout integration tests
+        uses: actions/checkout@v4
+
+      - name: Download tested release packages
+        uses: actions/download-artifact@v4
+        with:
+          name: oko-linux-x86_64
+          path: dist
+
+      - name: Smoke-test Ubuntu 24.04 desktop and WSS
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb xauth libxkbcommon-x11-0 libgl1 libx11-6
+          chmod +x dist/OkoTeacher-*.AppImage dist/OkoStudent-*.AppImage
+          (cd dist && sha256sum -c SHA256SUMS)
+          OKO_TEST_APPIMAGE=1 LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a python3 tests/gui-tls.py
+
+      - name: Smoke-test Fedora 43 X11 and WSS
+        run: |
+          set -euo pipefail
+          docker run --rm --network bridge --memory 3g --cpus 2 \
+            -v "$PWD:/work:ro" -w /work fedora:43 bash -lc '
+              set -e
+              dnf -y -q install python3 xorg-x11-server-Xvfb \
+                libX11 libxcb libxkbcommon libxkbcommon-x11 \
+                mesa-libGL mesa-dri-drivers libXcursor libXrandr libXi libwayland-client
+              Xvfb :98 -screen 0 800x600x24 -nolisten tcp >/tmp/oko-xvfb.log 2>&1 &
+              sleep 1
+              DISPLAY=:98 LIBGL_ALWAYS_SOFTWARE=1 OKO_TEST_APPIMAGE=1 python3 tests/gui-tls.py
+            '
+
   github-release:
     name: Publish GitHub Release after successful CI
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-linux-x86_64
+    needs: [build-linux-x86_64, distro-compat]
     runs-on: ubuntu-latest
     permissions:
       contents: write

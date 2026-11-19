@@ -1,13 +1,21 @@
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
-import tempfile, shutil, subprocess, os, tarfile, hashlib
+import tempfile, shutil, subprocess, os, tarfile, hashlib, re
 
 root=Path(__file__).resolve().parent.parent
 core=root
 desktop=root/'desktop'
 out=root/'dist'
 out.mkdir(parents=True,exist_ok=True)
-version='0.3.0'
+def cargo_version(manifest):
+    match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', manifest.read_text())
+    if not match: raise ValueError(f"No package version in {manifest}")
+    return match.group(1)
+version = cargo_version(core/'Cargo.toml')
+if version != cargo_version(desktop/'Cargo.toml'):
+    raise ValueError("Server and desktop version mismatch")
+if os.environ.get("GITHUB_REF_TYPE") == "tag" and os.environ.get("GITHUB_REF_NAME") != "v"+version:
+    raise ValueError("Release Git tag does not match Cargo version")
 appimagetool=Path(os.environ.get('APPIMAGETOOL_PATH', str(root/'.cache/appimagetool-x86_64.AppImage')))
 if not appimagetool.is_file():
     raise SystemExit('AppImageTool не найден: укажите APPIMAGETOOL_PATH или скачайте инструмент в .cache/')
@@ -108,6 +116,14 @@ TAR.GZ (установка для текущего пользователя бе
  - GUI требует x86_64 Linux, glibc 2.35+ и OpenGL/Mesa.
  - Тестирование реального Calculate Linux ещё не проводилось.
 '''
+    readme=readme.replace('0.3.0',version)
+    readme += """
+ОБНОВЛЕНИЕ/ОТКАТ:
+ Установка из GitHub: bash scripts/install.sh both
+ Откат: bash scripts/rollback.sh both
+ Удаление без удаления ключей: bash scripts/uninstall.sh both
+ Настройки и TLS ключи хранятся отдельно от программы.
+"""
     put(portable/'README.txt',readme)
     with tarfile.open(out/f'OkoNative-{version}-linux-x86_64.tar.gz','w:gz') as t:
         t.add(portable,arcname='OkoDesktop')
