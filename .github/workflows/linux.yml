@@ -58,10 +58,21 @@ jobs:
       - name: Test teacher/student role isolation
         run: node tests/role-auth.mjs
 
+      - name: Integration test encrypted WSS, certificate pinning and reconnection
+        run: python3 tests/tls-reconnect.py
+
+      - name: Integration test X11 keyboard/pointer lock and fail-safe
+        run: python3 tests/lock-x11.py
+
       - name: Smoke-test both native windows under Xvfb
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
         run: xvfb-run -a python3 tests/smoke-gui.py
+
+      - name: Full GUI test of encrypted classroom pairing
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a python3 tests/gui-tls.py
 
       - name: Download AppImage packaging tool
         run: |
@@ -73,13 +84,19 @@ jobs:
       - name: Produce AppImage, DEB and portable archives
         run: python3 scripts/package-linux.py
 
+      - name: Test packaged AppImages with real TLS/WSS classroom GUI
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          OKO_TEST_APPIMAGE: '1'
+        run: xvfb-run -a python3 tests/gui-tls.py
+
       - name: Verify checksums and packages
         run: |
           cd dist
           sha256sum -c SHA256SUMS
-          unzip -t OkoNative-0.2.0-FULL.zip | tail -1
-          ./OkoTeacher-0.2.0-x86_64.AppImage --appimage-extract-and-run --help
-          ./OkoStudent-0.2.0-x86_64.AppImage --appimage-extract-and-run --help
+          unzip -t OkoNative-0.3.0-FULL.zip | tail -1
+          ./OkoTeacher-0.3.0-x86_64.AppImage --appimage-extract-and-run --help
+          ./OkoStudent-0.3.0-x86_64.AppImage --appimage-extract-and-run --help
 
       - name: Publish workflow artifacts for testing
         uses: actions/upload-artifact@v4

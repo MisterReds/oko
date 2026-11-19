@@ -4,19 +4,25 @@ use anyhow::{Context, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
-use serde::Deserialize;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use oko::{pack_frame, AgentInfo, AgentStateMsg, Command, CommandReq, Hello, Snapshot, WatchMsg};
+use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
 const CONSOLE_HTML: &str = include_str!("../../ui/console.html");
+const MAX_AGENTS: usize = 128;
+const MAX_JPEG_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MESSAGE_CHARS: usize = 4096;
 
 #[derive(Clone)]
 struct App(Arc<AppInner>);
@@ -65,10 +71,15 @@ struct MasterArgs {
     token: Option<String>,
     agent_token: Option<String>,
     parent_pid: Option<u32>,
+    tls_dir: Option<PathBuf>,
+    tls_port: u16,
+    tls_bind: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct TokenQuery { token: Option<String> }
+struct TokenQuery {
+    token: Option<String>,
+}
 
 fn is_auth(app: &App, supplied: Option<&str>) -> bool {
     app.0.token.as_deref().map_or(true, |t| supplied == Some(t))
@@ -80,7 +91,9 @@ fn is_agent_auth(app: &App, supplied: Option<&str>) -> bool {
     }
 }
 fn header_token(headers: &HeaderMap) -> Option<&str> {
-    headers.get("authorization").and_then(|h| h.to_str().ok())
+    headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
 }
 fn usage() -> &'static str {
@@ -90,6 +103,9 @@ fn usage() -> &'static str {
   --token TOKEN  административный ключ (OKO_TOKEN)
   --agent-token TOKEN  отдельный ключ учеников (OKO_AGENT_TOKEN)
   --parent-pid PID  завершать сервер после смерти родительского приложения
+  --tls-dir DIR    включить TLS на порту 7601, сохранить сертификат в DIR
+  --tls-port N     порт WSS/HTTPS для учеников (7601)
+  --tls-bind IP    адрес TLS-слушателя (0.0.0.0; для тестов 127.0.0.1)
   --help         помощь"
 }
 fn parse_args() -> Result<MasterArgs> {
@@ -97,8 +113,13 @@ fn parse_args() -> Result<MasterArgs> {
         port: 7600,
         bind: "127.0.0.1".into(),
         token: std::env::var("OKO_TOKEN").ok().filter(|x| !x.is_empty()),
-        agent_token: std::env::var("OKO_AGENT_TOKEN").ok().filter(|x| !x.is_empty()),
+        agent_token: std::env::var("OKO_AGENT_TOKEN")
+            .ok()
+            .filter(|x| !x.is_empty()),
         parent_pid: None,
+        tls_dir: None,
+        tls_port: 7601,
+        tls_bind: "0.0.0.0".into(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -106,21 +127,51 @@ fn parse_args() -> Result<MasterArgs> {
             "--port" => a.port = it.next().context("--port: нужно число")?.parse()?,
             "--bind" => a.bind = it.next().context("--bind: нужен IP")?,
             "--token" => a.token = Some(it.next().context("--token: нужно значение")?),
-            "--agent-token" => a.agent_token = Some(it.next().context("--agent-token: нужно значение")?),
-            "--parent-pid" => a.parent_pid = Some(it.next().context("--parent-pid: нужен PID")?.parse()?),
-            "--help" | "-h" => { println!("{}", usage()); std::process::exit(0); }
+            "--agent-token" => {
+                a.agent_token = Some(it.next().context("--agent-token: нужно значение")?)
+            }
+            "--parent-pid" => {
+                a.parent_pid = Some(it.next().context("--parent-pid: нужен PID")?.parse()?)
+            }
+            "--tls-dir" => {
+                a.tls_dir = Some(PathBuf::from(it.next().context("--tls-dir: нужен путь")?))
+            }
+            "--tls-port" => a.tls_port = it.next().context("--tls-port: нужен порт")?.parse()?,
+            "--tls-bind" => a.tls_bind = it.next().context("--tls-bind: нужен IP")?,
+            "--help" | "-h" => {
+                println!("{}", usage());
+                std::process::exit(0);
+            }
             other => anyhow::bail!("неизвестный аргумент: {other}\n{}", usage()),
         }
     }
     if a.bind != "127.0.0.1" && a.bind != "::1" && a.token.is_none() {
-        anyhow::bail!("для доступа по сети (--bind {}) требуется --token или OKO_TOKEN", a.bind);
+        anyhow::bail!(
+            "для доступа по сети (--bind {}) требуется --token или OKO_TOKEN",
+            a.bind
+        );
     }
     if a.bind != "127.0.0.1" && a.bind != "::1" && a.agent_token.is_none() {
         anyhow::bail!("при доступе из LAN нужен отдельный --agent-token или OKO_AGENT_TOKEN");
     }
+    if a.tls_dir.is_some() {
+        if a.bind != "127.0.0.1" && a.bind != "::1" {
+            anyhow::bail!("when TLS is enabled, plaintext HTTP must bind to loopback");
+        }
+        if a.port == a.tls_port {
+            anyhow::bail!("plaintext HTTP and TLS must use different ports");
+        }
+        if a.token.is_none() || a.agent_token.is_none() {
+            anyhow::bail!("TLS needs separate admin and agent tokens");
+        }
+    }
     if let Some(t) = &a.agent_token {
-        if t.len() < 16 { anyhow::bail!("ключ учеников должен содержать минимум 16 символов"); }
-        if a.token.as_ref() == Some(t) { anyhow::bail!("административный ключ и ключ учеников должны различаться"); }
+        if t.len() < 16 {
+            anyhow::bail!("ключ учеников должен содержать минимум 16 символов");
+        }
+        if a.token.as_ref() == Some(t) {
+            anyhow::bail!("административный ключ и ключ учеников должны различаться");
+        }
     }
     if let Some(t) = &a.token {
         if t.len() < 16 {
@@ -128,6 +179,40 @@ fn parse_args() -> Result<MasterArgs> {
         }
     }
     Ok(a)
+}
+
+fn tls_files(dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    fs::create_dir_all(dir).context("create TLS identity directory")?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+    let fingerprint = dir.join("fingerprint.txt");
+    if cert.exists() != key.exists() {
+        anyhow::bail!("TLS certificate and private key are incomplete");
+    }
+    if !cert.exists() {
+        let generated = rcgen::generate_simple_self_signed(vec![
+            "localhost".into(),
+            "oko-classroom.local".into(),
+        ])?;
+        let der = generated.cert.der().as_ref();
+        let hash = Sha256::digest(der);
+        let hex: String = hash.iter().map(|v| format!("{v:02x}")).collect();
+        // Files stay in the user's private directory, never in the repository.
+        let mut opts = fs::OpenOptions::new();
+        opts.create_new(true).write(true).mode(0o600);
+        use std::io::Write;
+        let mut private = opts.open(&key)?;
+        private.write_all(generated.key_pair.serialize_pem().as_bytes())?;
+        fs::write(&cert, generated.cert.pem().as_bytes())?;
+        fs::write(dir.join("cert.der"), der)?;
+        fs::write(&fingerprint, hex)?;
+    }
+    if !fingerprint.is_file() {
+        anyhow::bail!("TLS fingerprint file is missing; verify certificate setup");
+    }
+    Ok((cert, key))
 }
 
 fn snapshot(app: &App) -> Snapshot {
@@ -138,10 +223,9 @@ fn snapshot(app: &App) -> Snapshot {
         .map(|h| {
             let mut info = h.info.lock().unwrap().clone();
             let f = h.frame.lock().unwrap();
-            info.last_frame_ms = f
-                .at
-                .map(|a| now.duration_since(a).as_millis() as u64)
-                .unwrap_or(u64::MAX);
+            info.last_frame_ms =
+                f.at.map(|a| now.duration_since(a).as_millis() as u64)
+                    .unwrap_or(u64::MAX);
             info.fps = f.fps;
             info.connected_ms = now.duration_since(h.connected).as_millis() as u64;
             info
@@ -152,7 +236,10 @@ fn snapshot(app: &App) -> Snapshot {
 }
 
 async fn console_handler() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], CONSOLE_HTML)
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        CONSOLE_HTML,
+    )
 }
 
 async fn api_state(State(app): State<App>, headers: HeaderMap) -> Response {
@@ -162,7 +249,11 @@ async fn api_state(State(app): State<App>, headers: HeaderMap) -> Response {
     Json(snapshot(&app)).into_response()
 }
 
-async fn api_command(State(app): State<App>, headers: HeaderMap, Json(req): Json<CommandReq>) -> Response {
+async fn api_command(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(req): Json<CommandReq>,
+) -> Response {
     if !is_auth(&app, header_token(&headers)) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -174,11 +265,26 @@ async fn api_command(State(app): State<App>, headers: HeaderMap, Json(req): Json
             .into_response();
     }
     if req.action == "message"
-        && req.text.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+        && req
+            .text
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
     {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "текст сообщения пуст"})),
+        )
+            .into_response();
+    }
+    if req
+        .text
+        .as_deref()
+        .is_some_and(|t| t.chars().count() > MAX_MESSAGE_CHARS)
+    {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error":"message exceeds 4096 characters"})),
         )
             .into_response();
     }
@@ -206,9 +312,18 @@ async fn api_command(State(app): State<App>, headers: HeaderMap, Json(req): Json
     }
 }
 
-async fn ws_agent(State(app): State<App>, Query(query): Query<TokenQuery>, upgrade: WebSocketUpgrade) -> Response {
-    if !is_agent_auth(&app, query.token.as_deref()) { return StatusCode::UNAUTHORIZED.into_response(); }
-    upgrade.on_upgrade(move |sock| agent_socket(app, sock))
+async fn ws_agent(
+    State(app): State<App>,
+    Query(query): Query<TokenQuery>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    if !is_agent_auth(&app, query.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    upgrade
+        .max_frame_size(MAX_JPEG_BYTES)
+        .max_message_size(MAX_JPEG_BYTES + 1024)
+        .on_upgrade(move |sock| agent_socket(app, sock))
 }
 
 async fn agent_socket(app: App, mut ws: WebSocket) {
@@ -224,7 +339,17 @@ async fn agent_socket(app: App, mut ws: WebSocket) {
         },
         _ => return,
     };
-    if hello.kind != "hello" {
+    if hello.kind != "hello"
+        || hello.name.len() > 128
+        || hello.hostname.len() > 128
+        || hello.user.len() > 128
+        || hello.backend.len() > 32
+        || hello.screen[0] == 0
+        || hello.screen[1] == 0
+        || hello.screen[0] > 32768
+        || hello.screen[1] > 32768
+    {
+        eprintln!("[oko-master] rejected invalid agent hello");
         return;
     }
     // id: безопасное имя хоста; при коллизии (тот же хост ещё «жив» в карте) — суффикс -2, -3…
@@ -233,6 +358,10 @@ async fn agent_socket(app: App, mut ws: WebSocket) {
     let mut id = base.clone();
     {
         let mut agents = app.0.agents.write().unwrap();
+        if agents.len() >= MAX_AGENTS {
+            eprintln!("[oko-master] too many connected agents");
+            return;
+        }
         let mut n = 1u32;
         while let Some(existing) = agents.get(&id) {
             let fresh = existing.seen.lock().unwrap().elapsed() < Duration::from_secs(15);
@@ -272,7 +401,11 @@ async fn agent_socket(app: App, mut ws: WebSocket) {
         seen: seen.clone(),
         gen: my_gen,
     };
-    app.0.agents.write().unwrap().insert(id.clone(), handle.clone());
+    app.0
+        .agents
+        .write()
+        .unwrap()
+        .insert(id.clone(), handle.clone());
     let _ = app.0.state_tx.send(());
     eprintln!("[oko-master] агент подключен: {id}");
 
@@ -281,6 +414,10 @@ async fn agent_socket(app: App, mut ws: WebSocket) {
             msg = ws.recv() => {
                 match msg {
                     Some(Ok(WsMessage::Binary(b))) => {
+                        if b.len()>MAX_JPEG_BYTES || !b.starts_with(&[0xff,0xd8]) {
+                            eprintln!("[oko-master] rejected invalid JPEG from {id}");
+                            continue;
+                        }
                         *handle.seen.lock().unwrap() = Instant::now();
                         {
                             let mut f = handle.frame.lock().unwrap();
@@ -340,9 +477,18 @@ async fn agent_socket(app: App, mut ws: WebSocket) {
     eprintln!("[oko-master] агент отключен: {id}");
 }
 
-async fn ws_console(State(app): State<App>, Query(query): Query<TokenQuery>, upgrade: WebSocketUpgrade) -> Response {
-    if !is_auth(&app, query.token.as_deref()) { return StatusCode::UNAUTHORIZED.into_response(); }
-    upgrade.on_upgrade(move |sock| console_socket(app, sock))
+async fn ws_console(
+    State(app): State<App>,
+    Query(query): Query<TokenQuery>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    if !is_auth(&app, query.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    upgrade
+        .max_frame_size(256 * 1024)
+        .max_message_size(256 * 1024)
+        .on_upgrade(move |sock| console_socket(app, sock))
 }
 
 async fn console_socket(app: App, mut ws: WebSocket) {
@@ -375,7 +521,7 @@ async fn console_socket(app: App, mut ws: WebSocket) {
                 match msg {
                     Some(Ok(WsMessage::Text(t))) => {
                         if let Ok(w) = serde_json::from_str::<WatchMsg>(&t) {
-                            *conn.watched.lock().unwrap() = w.ids.into_iter().collect();
+                            *conn.watched.lock().unwrap() = w.ids.into_iter().take(MAX_AGENTS).collect();
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) | None => break,
@@ -384,7 +530,11 @@ async fn console_socket(app: App, mut ws: WebSocket) {
             }
         }
     }
-    app.0.consoles.write().unwrap().retain(|c| !Arc::ptr_eq(c, &conn));
+    app.0
+        .consoles
+        .write()
+        .unwrap()
+        .retain(|c| !Arc::ptr_eq(c, &conn));
     let _ = app.0.state_tx.send(());
 }
 
@@ -396,7 +546,9 @@ async fn main() -> Result<()> {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if !std::path::PathBuf::from(format!("/proc/{pid}/cmdline")).exists() {
-                    eprintln!("[oko-master] родительское приложение завершилось, сервер остановлен");
+                    eprintln!(
+                        "[oko-master] родительское приложение завершилось, сервер остановлен"
+                    );
                     std::process::exit(0);
                 }
             }
@@ -438,7 +590,27 @@ async fn main() -> Result<()> {
         .route("/ws/console", get(ws_console))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind((args.bind.as_str(), args.port)).await?;
-    eprintln!("[oko-master] консоль учителя: http://{}:{}", args.bind, args.port);
-    axum::serve(listener, router).await?;
+    eprintln!("[oko-master] local UI: http://{}:{}", args.bind, args.port);
+    if let Some(dir) = args.tls_dir {
+        let (cert, key) = tls_files(&dir)?;
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+        let port = args.tls_port;
+        let tls_bind = args.tls_bind;
+        let local_router = router.clone();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, local_router).await {
+                eprintln!("[oko-master] local HTTP terminated: {e}");
+            }
+        });
+        eprintln!("[oko-master] encrypted classroom listener: wss://{tls_bind}:{port}/ws/agent");
+        axum_server::bind_rustls(
+            format!("{tls_bind}:{port}").parse::<std::net::SocketAddr>()?,
+            config,
+        )
+        .serve(router.into_make_service())
+        .await?;
+    } else {
+        axum::serve(listener, router).await?;
+    }
     Ok(())
 }
