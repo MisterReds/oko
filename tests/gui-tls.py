@@ -15,9 +15,9 @@ ROOT=pathlib.Path(__file__).resolve().parents[1]
 DESKTOP=ROOT/"desktop/target/release/oko-desktop"
 CORE=ROOT/"target/release"
 APPIMAGE_TEST=os.environ.get("OKO_TEST_APPIMAGE")=="1"
-TEACHER_CMD=([str(ROOT/"dist/OkoTeacher-0.3.0-x86_64.AppImage"),"--appimage-extract-and-run"]
+TEACHER_CMD=([str(ROOT/"dist/OkoTeacher-0.4.0-x86_64.AppImage"),"--appimage-extract-and-run"]
              if APPIMAGE_TEST else [str(DESKTOP),"--teacher"])
-STUDENT_CMD=([str(ROOT/"dist/OkoStudent-0.3.0-x86_64.AppImage"),"--appimage-extract-and-run"]
+STUDENT_CMD=([str(ROOT/"dist/OkoStudent-0.4.0-x86_64.AppImage"),"--appimage-extract-and-run"]
              if APPIMAGE_TEST else [str(DESKTOP),"--student"])
 
 def free_pair():
