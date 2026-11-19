@@ -26,7 +26,8 @@ with tempfile.TemporaryDirectory(prefix="oko-install-ci-") as t:
     repos=base/"releases"
     config=base/"config"
     config.mkdir()
-    (config/"native-student.json").write_text('{"server":"wss://example.invalid","token":"test-not-real"}')
+    (config/"oko").mkdir()
+    (config/"oko/native-student.json").write_text('{"server":"wss://example.invalid","token":"test-not-real"}')
     release_files={}
     for version in ("0.3.0","0.4.0"):
         stage=repos/version
@@ -68,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix="oko-install-ci-") as t:
     assert (bin/"OkoStudent.AppImage").read_bytes()==b"mock AppImage Student version 0.4.0"
     assert (data/"oko/previous/Teacher").exists()
     assert (data/"oko/previous/Student").exists()
-    assert (config/"native-student.json").is_file()
+    assert (config/"oko/native-student.json").is_file()
     print("PASS update both roles and preserve user config")
     call("rollback.sh","both",env=env)
     assert (bin/"OkoTeacher.AppImage").read_bytes()==b"mock AppImage Teacher version 0.3.0"
@@ -81,11 +82,11 @@ with tempfile.TemporaryDirectory(prefix="oko-install-ci-") as t:
     call("uninstall.sh","student",env=env)
     assert not (bin/"OkoStudent.AppImage").exists()
     assert (bin/"OkoTeacher.AppImage").exists()
-    assert (config/"native-student.json").is_file()
+    assert (config/"oko/native-student.json").is_file()
     print("PASS uninstall student without touching teacher and settings")
     call("uninstall.sh","both",env=env)
     assert not (bin/"OkoTeacher.AppImage").exists()
-    assert (config/"native-student.json").is_file()
+    assert (config/"oko/native-student.json").is_file()
     print("PASS full uninstall preserves config")
     call("uninstall.sh","both","--purge",env=env)
     assert not config.joinpath("oko").exists()
