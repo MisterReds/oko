@@ -56,6 +56,40 @@ struct StudentCfg {
     name: String,
     autostart: bool,
 }
+#[derive(Debug, Clone, Deserialize)]
+struct StudentHealth {
+    pid: u32,
+    phase: String,
+    updated_unix: u64,
+    last_frame_unix: Option<u64>,
+    backend: Option<String>,
+    screen: Option<[u32; 2]>,
+    last_error: Option<String>,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn read_student_health(pid: u32) -> Option<StudentHealth> {
+    let path = state_root().join("agent-health.json");
+    let status: StudentHealth = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    // Never confuse an earlier process's status with the current agent.
+    (status.pid == pid).then_some(status)
+}
+
+fn streaming_health(health: Option<&StudentHealth>) -> bool {
+    health.is_some_and(|s| {
+        s.phase == "streaming"
+            && unix_now().saturating_sub(s.updated_unix) <= 12
+            && s.last_frame_unix
+                .is_some_and(|time| unix_now().saturating_sub(time) <= 12)
+    })
+}
+
 enum NetworkEvent {
     Snapshot(Vec<AgentInfo>),
     Frame(String, Vec<u8>),
@@ -91,6 +125,7 @@ struct OkoApp {
     tx: Sender<NetworkEvent>,
     last_start: Instant,
     student_running: bool,
+    student_connected: bool,
     student_pid: Option<u32>,
     console_alive: Option<Arc<AtomicBool>>,
 }
@@ -278,19 +313,24 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
         // Always point autostart to the SAME stable path used by the updater.
         // In v0.3 this copied the AppImage to a second location, so future
         // updates installed by scripts/install.sh did not update autostart.
-        let data_root = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
+        let data_root = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
+            });
         let dest = data_root.join("oko/bin/OkoStudent.AppImage");
         fs::create_dir_all(dest.parent().ok_or("Некорректный каталог ОКО")?)
-            .map_err(|e|e.to_string())?;
+            .map_err(|e| e.to_string())?;
         if !dest.is_file() {
-            let temp = dest.with_extension(format!("AppImage.tmp-{}",std::process::id()));
-            fs::copy(&executable,&temp).map_err(|e|e.to_string())?;
-            #[cfg(unix)] {
+            let temp = dest.with_extension(format!("AppImage.tmp-{}", std::process::id()));
+            fs::copy(&executable, &temp).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&temp,fs::Permissions::from_mode(0o755)).map_err(|e|e.to_string())?;
+                fs::set_permissions(&temp, fs::Permissions::from_mode(0o755))
+                    .map_err(|e| e.to_string())?;
             }
-            fs::rename(temp,&dest).map_err(|e|e.to_string())?;
+            fs::rename(temp, &dest).map_err(|e| e.to_string())?;
         }
         dest
     } else {
@@ -490,6 +530,7 @@ impl OkoApp {
             tx,
             last_start: Instant::now(),
             student_running: false,
+            student_connected: false,
             student_pid: None,
             console_alive: None,
         };
@@ -663,13 +704,15 @@ impl OkoApp {
                         } else {
                             "●  Ожидание соединения".to_string()
                         }
+                    } else if self.student_connected {
+                        "●  Экран передаётся".to_string()
                     } else if self.student_running {
                         "●  Агент запущен".to_string()
                     } else {
                         "●  Агент остановлен".to_string()
                     };
                     ui.label(
-                        RichText::new(text).color(if self.online || self.student_running {
+                        RichText::new(text).color(if self.online || self.student_connected {
                             ACCENT
                         } else {
                             MUTED
@@ -1045,7 +1088,9 @@ impl OkoApp {
 
     fn student_main(&mut self, ctx: &egui::Context) {
         let actual = student_pid();
+        let agent_health = actual.and_then(read_student_health);
         self.student_running = actual.is_some();
+        self.student_connected = streaming_health(agent_health.as_ref());
         self.student_pid = actual;
         egui::CentralPanel::default().frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(24)))
             .show(ctx,|ui|{
@@ -1091,7 +1136,7 @@ impl OkoApp {
                         if ui.add_sized([185.0,36.0],egui::Button::new("▶ Подключиться").fill(ACCENT)).clicked(){
                             match secure_write("native-student.json",&self.student)
                                 .and_then(|_|spawn_agent(&self.student).map(|pid|{self.student_pid=Some(pid)})){
-                                    Ok(_)=>self.last_feedback="Агент запущен; соединение проверяйте по журналу".into(),
+                                    Ok(_)=>self.last_feedback="Процесс агента запущен. Проверяем соединение и поступление кадров...".into(),
                                     Err(e)=>self.last_feedback=e,
                                 };
                         }
@@ -1108,10 +1153,44 @@ impl OkoApp {
                     ui.label(RichText::new("Диагностика").size(18.0).strong());
                     ui.add_space(7.0);
                     ui.horizontal(|ui|{
-                        ui.label(RichText::new(if self.student_running{"● Агент запущен"}else{"● Агент не запущен"})
-                            .color(if self.student_running{ACCENT}else{WARNING}));
+                        let label = if self.student_connected {
+                            "● Экран передаётся преподавателю"
+                        } else if self.student_running {
+                            "● Процесс работает, передача не подтверждена"
+                        } else {
+                            "● Агент не запущен"
+                        };
+                        ui.label(RichText::new(label).color(if self.student_connected {ACCENT} else {WARNING}));
                         if let Some(pid)=self.student_pid{ui.label(RichText::new(format!("PID {pid}")).color(MUTED));}
                     });
+                    if let Some(h)=agent_health.as_ref() {
+                        let (description,color)=match h.phase.as_str() {
+                            "streaming" if self.student_connected => ("Кадры передаются преподавателю",ACCENT),
+                            "streaming" => ("Нет свежих кадров — проверьте сеть и захват",WARNING),
+                            "capturing" => ("Соединение установлено; ожидаем первый кадр",WARNING),
+                            "connected" => ("Подключено к серверу; проверяем захват",WARNING),
+                            "connecting" => ("Устанавливаем соединение с преподавателем...",WARNING),
+                            "reconnecting" => ("Нет соединения; выполняется переподключение",WARNING),
+                            "capture_error" => ("Ошибка захвата экрана; проверьте окружение Linux",WARNING),
+                            _ => ("Запуск и диагностика...",MUTED),
+                        };
+                        if unix_now().saturating_sub(h.updated_unix) > 12 {
+                            ui.colored_label(WARNING,"Нет свежего статуса агента — проверьте журнал.");
+                        } else {
+                            ui.colored_label(color, description);
+                        }
+                        if let Some(backend)=&h.backend {
+                            ui.label(format!("Захват: {}{}",backend,h.screen.map(|s|format!(" · {}×{}",s[0],s[1])).unwrap_or_default()));
+                        }
+                        if let Some(last)=h.last_frame_unix {
+                            ui.label(format!("Последний отправленный кадр: {} с назад",unix_now().saturating_sub(last)));
+                        }
+                        if let Some(error)=&h.last_error {
+                            ui.colored_label(WARNING,format!("Последняя ошибка: {}",error));
+                        }
+                    } else if self.student_running {
+                        ui.colored_label(WARNING,"Ожидаем статус от агента. Если он не появится, проверьте права и журнал.");
+                    }
                     ui.label(format!("Графический сеанс: {}",std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_|"не определён".into())));
                     let is_wayland=std::env::var("XDG_SESSION_TYPE").ok().as_deref()==Some("wayland");
                     if is_wayland {
