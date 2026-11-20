@@ -46,6 +46,9 @@ jobs:
       - name: Prepare build-time font
         run: bash scripts/bootstrap-fonts.sh
 
+      - name: Diagnose basic Linux build compatibility
+        run: bash scripts/doctor.sh
+
       - name: Test installer, updates, rollback and uninstall
         run: python3 tests/installer-lifecycle.py
 
@@ -63,6 +66,9 @@ jobs:
 
       - name: Test teacher/student role isolation
         run: node tests/role-auth.mjs
+
+      - name: Security regression - WSS student endpoint cannot access teacher API
+        run: python3 tests/tls-surface.py
 
       - name: Integration test encrypted WSS, certificate pinning and reconnection
         run: python3 tests/tls-reconnect.py
@@ -89,6 +95,9 @@ jobs:
 
       - name: Produce AppImage, DEB and portable archives
         run: python3 scripts/package-linux.py
+
+      - name: Verify source tarball is independently buildable
+        run: python3 tests/source-package.py
 
       - name: Test packaged AppImages with real TLS/WSS classroom GUI
         env:

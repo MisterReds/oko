@@ -76,6 +76,7 @@ echo "Запуск: $target/bin/oko-desktop --teacher"
 echo "Запуск: $target/bin/oko-desktop --student"
 '''
     put(portable/'scripts/install-user.sh',install,0o755)
+    shutil.copy2(root/'scripts/doctor.sh', portable/'scripts/doctor.sh')
     readme='''ОКО Native 0.3.0 — Linux x86-64 (Rust/egui)
 
 Два полноценных графических окна — преподаватель и ученик.
@@ -192,15 +193,18 @@ exec "$BASE/usr/bin/oko-desktop" --{lower} "$@"
         with (out/f'build-{lower}.log').open('wb') as log:
             subprocess.run([str(appimagetool),'--appimage-extract-and-run',str(app),str(file)],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
         file.chmod(0o755)
+    # Ship a genuinely buildable repository-shaped source tree, rather than
+    # separate core/desktop folders missing build scripts and tests.
     source=tmp/'OkoNativeSource'
-    shutil.copytree(desktop/'src',source/'desktop/src')
-    for name in ('Cargo.toml','Cargo.lock','Dockerfile.build'):
-        shutil.copy2(desktop/name,source/'desktop'/name)
-    shutil.copytree(core/'src',source/'core/src')
-    shutil.copytree(core/'ui',source/'core/ui')
-    shutil.copytree(core/'assets',source/'core/assets',ignore=shutil.ignore_patterns('*.ttf'))
-    for name in ('Cargo.toml','Cargo.lock','README.md'):
-        shutil.copy2(core/name,source/'core'/name)
+    for rel in ('src','ui','assets','desktop/src','scripts','tests','docs','.github'):
+        shutil.copytree(root/rel, source/rel,
+            ignore=shutil.ignore_patterns('*.ttf','__pycache__','*.pyc','*.log','.env'))
+    for rel in ('Cargo.toml','Cargo.lock','README.md','SECURITY.md','LICENSE',
+                'desktop/Cargo.toml','desktop/Cargo.lock','desktop/Dockerfile.build'):
+        file=root/rel
+        if file.is_file():
+            (source/rel).parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(file,source/rel)
     shutil.copy2(portable/'README.txt',source/'README-START.txt')
     with tarfile.open(out/f'OkoNativeSource-{version}.tar.gz','w:gz') as t:
         t.add(source,arcname='OkoNativeSource')
