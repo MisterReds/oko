@@ -1,6 +1,7 @@
 // ОКО — типы протокола и общие утилиты.
 pub mod demo;
 pub mod grim;
+pub mod status;
 pub mod x11;
 
 use serde::{Deserialize, Serialize};

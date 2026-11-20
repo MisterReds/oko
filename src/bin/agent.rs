@@ -2,7 +2,7 @@
 // приём команд (блокировка экрана, сообщения).
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use oko::{AgentStateMsg, Capture, Command, Hello};
+use oko::{status::AgentHealth, AgentStateMsg, Capture, Command, Hello};
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::{CertificateDer, ServerName, UnixTime},
@@ -307,7 +307,8 @@ fn spawn_capture(
     })
 }
 
-async fn connect_and_run(args: &Args) -> Result<()> {
+async fn connect_and_run(args: &Args, health: &mut AgentHealth) -> Result<()> {
+    health.set("connecting");
     let url = if args.server.contains("/ws/agent") {
         args.server.clone()
     } else {
@@ -330,10 +331,12 @@ async fn connect_and_run(args: &Args) -> Result<()> {
         .with_context(|| format!("connection to {}", args.server))?;
     let (mut sink, mut stream) = ws.split();
     eprintln!("[oko-agent] connected to {}", args.server);
+    health.set("connected");
 
     let backend = make_backend(&args.name, args.quality, args.demo)?;
     let screen = backend.screen();
     let backend_name = backend.backend_name().to_string();
+    health.capture_ready(&backend_name, screen);
     let hello = Hello {
         kind: "hello".into(),
         name: args.name.clone(),
@@ -353,11 +356,18 @@ async fn connect_and_run(args: &Args) -> Result<()> {
     let worker = spawn_capture(backend, args.fps, cmd_rx, jpeg_tx, state_tx, active.clone());
 
     let result: Result<()> = async {
+        let mut last_report = Instant::now() - Duration::from_secs(10);
         loop {
             tokio::select! {
                 jpeg = jpeg_rx.recv() => {
                     match jpeg {
-                        Some(j) => sink.send(Message::Binary(j.into())).await?,
+                        Some(j) => {
+                            sink.send(Message::Binary(j.into())).await?;
+                            if last_report.elapsed() >= Duration::from_secs(4) {
+                                health.frame_sent();
+                                last_report = Instant::now();
+                            }
+                        },
                         None => break,
                     }
                 }
@@ -397,11 +407,29 @@ async fn connect_and_run(args: &Args) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = parse_args()?;
+    let mut health = AgentHealth::new();
+    health.save_logged();
     eprintln!("[oko-agent] имя «{}» · сервер {}", args.name, args.server);
     loop {
-        match connect_and_run(&args).await {
-            Ok(()) => eprintln!("[oko-agent] соединение закрыто"),
-            Err(e) => eprintln!("[oko-agent] ошибка: {e:#}"),
+        match connect_and_run(&args, &mut health).await {
+            Ok(()) => {
+                eprintln!("[oko-agent] соединение закрыто");
+                health.error("Соединение закрыто. Повторное подключение...");
+            }
+            Err(e) => {
+                eprintln!("[oko-agent] ошибка: {e:#}");
+                // Do not leak an authentication token or fingerprint into a status file.
+                let mut detail = format!("{e:#}");
+                for secret in [args.token.as_deref(), args.fingerprint.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !secret.is_empty() {
+                        detail = detail.replace(secret, "[скрыто]");
+                    }
+                }
+                health.error(&detail);
+            }
         }
         eprintln!("[oko-agent] переподключение через 3 с…");
         tokio::time::sleep(Duration::from_secs(3)).await;

@@ -15,9 +15,10 @@ ROOT=pathlib.Path(__file__).resolve().parents[1]
 DESKTOP=ROOT/"desktop/target/release/oko-desktop"
 CORE=ROOT/"target/release"
 APPIMAGE_TEST=os.environ.get("OKO_TEST_APPIMAGE")=="1"
-TEACHER_CMD=([str(ROOT/"dist/OkoTeacher-0.4.0-x86_64.AppImage"),"--appimage-extract-and-run"]
+VERSION=next(line.split('"')[1] for line in (ROOT/"Cargo.toml").read_text().splitlines() if line.startswith('version = '))
+TEACHER_CMD=([str(ROOT/f"dist/OkoTeacher-{VERSION}-x86_64.AppImage"),"--appimage-extract-and-run"]
              if APPIMAGE_TEST else [str(DESKTOP),"--teacher"])
-STUDENT_CMD=([str(ROOT/"dist/OkoStudent-0.4.0-x86_64.AppImage"),"--appimage-extract-and-run"]
+STUDENT_CMD=([str(ROOT/f"dist/OkoStudent-{VERSION}-x86_64.AppImage"),"--appimage-extract-and-run"]
              if APPIMAGE_TEST else [str(DESKTOP),"--student"])
 
 def free_pair():
@@ -90,6 +91,16 @@ with tempfile.TemporaryDirectory(prefix="oko-native-wss-gui-") as home:
             return next((a for a in agents if a["name"]=="CI-X11-Student" and a["last_frame_ms"]<2500 and a["backend"]=="x11"),None)
         a=wait(state,"student native GUI configuration streams over WSS")
         assert a["screen"]==[800,600] or (a["screen"][0]>0 and a["screen"][1]>0)
+        status_path=sdir/".local/state/oko/agent-health.json"
+        def streaming_health():
+            if not status_path.exists():return None
+            health=json.loads(status_path.read_text())
+            if health.get("pid")==student_pid and health.get("phase")=="streaming" and health.get("last_frame_unix"):
+                return health
+            return None
+        agent_health=wait(streaming_health,"native student reports actual outgoing frames")
+        assert agent_health["backend"]=="x11" and agent_health["last_error"] is None
+        print("PASS: GUI agent reports actual X11 streaming")
         assert teacher.poll() is None and student_ui.poll() is None
         print("PASS native Teacher+Student GUI, TLS fingerprint pairing, X11 screen frames")
     finally:
