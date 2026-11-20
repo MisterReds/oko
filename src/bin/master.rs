@@ -315,9 +315,13 @@ async fn api_command(
 async fn ws_agent(
     State(app): State<App>,
     Query(query): Query<TokenQuery>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !is_agent_auth(&app, query.token.as_deref()) {
+    // Prefer the Authorization header. Keep the query parameter temporarily
+    // for existing 0.4.x agents; a later protocol version can remove it.
+    let supplied = header_token(&headers).or(query.token.as_deref());
+    if !is_agent_auth(&app, supplied) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     upgrade
@@ -581,14 +585,17 @@ async fn main() -> Result<()> {
         }
     });
 
-    let router = Router::new()
+    // The teacher's HTTP/API/console surface is strictly LOCAL ONLY.
+    // In particular, do not reuse this router on the network-facing TLS listener:
+    // even an authenticated API has no reason to be reachable by pupil PCs.
+    let local_router = Router::new()
         .route("/", get(console_handler))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/state", get(api_state))
         .route("/api/command", post(api_command))
         .route("/ws/agent", get(ws_agent))
         .route("/ws/console", get(ws_console))
-        .with_state(app);
+        .with_state(app.clone());
     let listener = tokio::net::TcpListener::bind((args.bind.as_str(), args.port)).await?;
     eprintln!("[oko-master] local UI: http://{}:{}", args.bind, args.port);
     if let Some(dir) = args.tls_dir {
@@ -596,7 +603,12 @@ async fn main() -> Result<()> {
         let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
         let port = args.tls_port;
         let tls_bind = args.tls_bind;
-        let local_router = router.clone();
+        // The LAN listener intentionally exposes ONLY the pupil agent endpoint
+        // and a minimal readiness check, never /, /api/* or /ws/console.
+        let agent_router = Router::new()
+            .route("/healthz", get(|| async { "ok" }))
+            .route("/ws/agent", get(ws_agent))
+            .with_state(app);
         tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, local_router).await {
                 eprintln!("[oko-master] local HTTP terminated: {e}");
@@ -607,10 +619,10 @@ async fn main() -> Result<()> {
             format!("{tls_bind}:{port}").parse::<std::net::SocketAddr>()?,
             config,
         )
-        .serve(router.into_make_service())
+        .serve(agent_router.into_make_service())
         .await?;
     } else {
-        axum::serve(listener, router).await?;
+        axum::serve(listener, local_router).await?;
     }
     Ok(())
 }
