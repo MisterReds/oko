@@ -58,6 +58,9 @@ jobs:
       - name: Compile native desktop UI
         run: cargo build --release --locked --manifest-path desktop/Cargo.toml
 
+      - name: Test honest student connection and capture status
+        run: python3 tests/agent-health.py
+
       - name: Test teacher/student role isolation
         run: node tests/role-auth.mjs
 
@@ -97,9 +100,11 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS
-          unzip -t OkoNative-0.4.0-FULL.zip | tail -1
-          ./OkoTeacher-0.4.0-x86_64.AppImage --appimage-extract-and-run --help
-          ./OkoStudent-0.4.0-x86_64.AppImage --appimage-extract-and-run --help
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' ../Cargo.toml | head -1)"
+          test -n "$VERSION"
+          unzip -t "OkoNative-${VERSION}-FULL.zip" | tail -1
+          "./OkoTeacher-${VERSION}-x86_64.AppImage" --appimage-extract-and-run --help
+          "./OkoStudent-${VERSION}-x86_64.AppImage" --appimage-extract-and-run --help
 
       - name: Publish workflow artifacts for testing
         uses: actions/upload-artifact@v4
